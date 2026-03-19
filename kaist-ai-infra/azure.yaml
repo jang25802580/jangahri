@@ -3,4 +3,11 @@
 name: kaist-ai-infra
 metadata:
   template: kaist-ai-infra@0.0.1-beta
-services: {}
+services:
+  functions:
+    language: python
+    project: ./
+    host: function
+  staticwebapp:
+    project: ../kaist-ai-webapp
+    host: staticwebapp

@@ -103,6 +103,14 @@ This specification defines the architecture and requirements for a PDF-based kno
 - **DAT-003**: Chat history must be persisted per user session
 - **DAT-004**: Data retention policy must be configurable (default: 90 days)
 
+### Operational Requirements
+
+- **OPS-001**: System must monitor and alert on API latency (P95 > 5s), error rates (> 1%), and Cosmos DB RU consumption
+- **OPS-002**: Automated data cleanup job must run daily to enforce data retention policies
+- **OPS-003**: Malware scanning must use a quarantine-first pattern (Upload -> Quarantine -> Scan -> Process)
+- **OPS-004**: File uploads exceeding 10MB must support resumable upload protocol or chunked transfer to handle network interruptions
+- **OPS-005**: API must return standardized error responses including error codes and correlation IDs
+
 ### Constraints
 
 - **CON-001**: Initial implementation will use Azure OpenAI or similar for embeddings until Gemini integration
@@ -130,6 +138,24 @@ This specification defines the architecture and requirements for a PDF-based kno
 - **PAT-005**: Use Adapter pattern for future LLM provider switching (Gemini integration)
 
 ## 4. Interfaces & Data Contracts
+
+### Security Schema
+
+#### Authentication & Authorization
+- **Protocol**: OAuth 2.0 / OIDC (Azure AD/Entra ID)
+- **Token Validity**: Access Token (1 hour), Refresh Token (Rolling window up to 90 days)
+- **Roles**:
+  - `Reader`: Can query documents and view chat history (Default)
+  - `Contributor`: Can upload new documents
+  - `Owner`: Can delete documents and manage system settings
+
+#### Endpoint Permissions Matrix
+| Endpoint | Method | Required Role | Description |
+|----------|--------|---------------|-------------|
+| `/api/pdf/upload` | POST | Contributor | Upload new document |
+| `/api/pdf/{id}` | DELETE | Owner | Delete document & associated data |
+| `/api/chat/*` | ANY | Reader | Chat operations |
+| `/api/config/*` | ANY | Owner | System configuration |
 
 ### API Endpoints
 
@@ -167,6 +193,15 @@ Response (200 OK):
   "chunkCount": 42,
   "error": "string|null"
 }
+```
+
+#### Delete Document Endpoint
+
+```http
+DELETE /api/pdf/{documentId}
+Authorization: Bearer <token> (Role: Owner)
+
+Response (204 No Content)
 ```
 
 #### Chat Query Endpoint
@@ -224,6 +259,24 @@ Response (200 OK):
   ],
   "total": 150,
   "hasMore": true
+}
+```
+
+#### Common Error Response (RFC 7807/Schema Violation)
+
+```http
+Status: 400/401/403/404/500
+
+{
+  "code": "string (e.g. invalid_input)",
+  "message": "Human readable error",
+  "correlationId": "uuid (for distributed tracing)",
+  "details": [
+    {
+      "field": "string (e.g. query)",
+      "issue": "string (e.g. required)"
+    }
+  ]
 }
 ```
 

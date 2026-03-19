@@ -26,6 +26,9 @@ param cosmosEndpoint string
 @description('Cosmos DB database name')
 param cosmosDatabaseName string
 
+@description('Key Vault name for secret references')
+param keyVaultName string
+
 @description('CORS allowed origins')
 param corsAllowedOrigins array = [
   'https://*.azurestaticapps.net'
@@ -156,6 +159,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'COSMOS_DATABASE_NAME'
           value: cosmosDatabaseName
+        }
+        {
+          name: 'GOOGLE_API_KEY'
+          value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=GOOGLE-API-KEY)'
         }
         {
           name: 'WEBSITE_RUN_FROM_PACKAGE'
