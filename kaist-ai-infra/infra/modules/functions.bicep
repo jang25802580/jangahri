@@ -96,7 +96,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' existing 
 resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   name: functionAppName
   location: location
-  tags: tags
+  tags: union(tags, { 'azd-service-name': 'kaist-ai-functions' })
   kind: 'functionapp,linux'
   identity: {
     type: 'SystemAssigned'
@@ -169,8 +169,28 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: '@Microsoft.KeyVault(SecretUri=https://${keyVaultName}.vault.azure.net/secrets/google-cloud-project/)'
         }
         {
-          name: 'WEBSITE_RUN_FROM_PACKAGE'
-          value: '1'
+          name: 'STORAGE_ACCOUNT_NAME'
+          value: storageAccountName
+        }
+        {
+          name: 'LLM_MODEL'
+          value: 'gemini-2.0-flash'
+        }
+        {
+          name: 'EMBEDDING_MODEL'
+          value: 'gemini-embedding-001'
+        }
+        {
+          name: 'PDF_CONTAINER_NAME'
+          value: 'pdfs'
+        }
+        {
+          name: 'SCM_DO_BUILD_DURING_DEPLOYMENT'
+          value: 'true'
+        }
+        {
+          name: 'ENABLE_ORYX_BUILD'
+          value: 'true'
         }
       ]
     }
