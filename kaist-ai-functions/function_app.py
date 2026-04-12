@@ -1,22 +1,51 @@
 import logging
-
 import azure.functions as func
-
 from shared.config import get_config
 
 logger = logging.getLogger(__name__)
 
+# FunctionApp 정의 (인증 레벨 설정)
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
 # ---------------------------------------------------------------------------
-# Health Check
+# 1. Test Gemini (교수님 강의 예제 - 브라우저 확인용)
 # ---------------------------------------------------------------------------
+@app.route(route="test_gemini", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def test_gemini(req: func.HttpRequest) -> func.HttpResponse:
+    """Test Gemini API connectivity."""
+    import json
+    from services.embedding_service import EmbeddingService
 
+    try:
+        # EmbeddingService의 ping 기능을 이용해 연결 확인
+        EmbeddingService().ping()
+        return func.HttpResponse(
+            body=json.dumps({
+                "status": "ok", 
+                "message": "Hello! Gemini API is reachable.",
+                "type": "text"
+            }),
+            status_code=200,
+            mimetype="application/json",
+        )
+    except Exception as exc:
+        logger.warning("Gemini connectivity test failed: %s", exc)
+        return func.HttpResponse(
+            body=json.dumps({
+                "status": "unavailable", 
+                "message": str(exc)
+            }),
+            status_code=503,
+            mimetype="application/json",
+        )
+
+# ---------------------------------------------------------------------------
+# 2. Health Check
+# ---------------------------------------------------------------------------
 @app.route(route="health", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def health(req: func.HttpRequest) -> func.HttpResponse:
     """Liveness probe — returns service connectivity status."""
     import json
-
     checks: dict[str, str] = {}
 
     # Azure Blob Storage
@@ -55,18 +84,14 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
         mimetype="application/json",
     )
 
-
 # ---------------------------------------------------------------------------
-# PDF Upload
+# 3. PDF Upload
 # ---------------------------------------------------------------------------
-
 @app.route(route="pdf/upload", methods=["POST"])
 def pdf_upload(req: func.HttpRequest) -> func.HttpResponse:
-    """Upload a PDF file and enqueue it for processing."""
     import json
     import uuid
     from datetime import datetime, timezone
-
     from shared.exceptions import InvalidFileTypeError
     from services.storage_service import BlobStorageService
     from services.cosmos_service import CosmosRepository
@@ -76,33 +101,25 @@ def pdf_upload(req: func.HttpRequest) -> func.HttpResponse:
         file = req.files.get("file")
         if file is None:
             return func.HttpResponse(
-                json.dumps({"error": "No file provided. Send as multipart/form-data field 'file'."}),
+                json.dumps({"error": "No file provided."}),
                 status_code=400,
                 mimetype="application/json",
             )
 
         content_type = file.content_type or ""
         if "pdf" not in content_type.lower():
-            raise InvalidFileTypeError(f"Expected application/pdf, got '{content_type}'")
+            raise InvalidFileTypeError(f"Expected PDF, got '{content_type}'")
 
         file_bytes = file.read()
-        if len(file_bytes) > 50 * 1024 * 1024:  # 50 MB
-            return func.HttpResponse(
-                json.dumps({"error": "File exceeds 50 MB limit."}),
-                status_code=413,
-                mimetype="application/json",
-            )
-
         document_id = str(uuid.uuid4())
         blob_name = f"{document_id}.pdf"
-        original_filename = file.filename or blob_name
-
+        
         storage = BlobStorageService()
         blob_url = storage.upload_pdf(file_bytes, blob_name)
 
         record = DocumentRecord(
             id=document_id,
-            file_name=original_filename,
+            file_name=file.filename or blob_name,
             blob_url=blob_url,
             status="pending",
             uploaded_at=datetime.now(timezone.utc).isoformat(),
@@ -110,91 +127,43 @@ def pdf_upload(req: func.HttpRequest) -> func.HttpResponse:
         )
         CosmosRepository().upsert_document(record.model_dump())
 
-        response = UploadResponse(
-            document_id=document_id,
-            file_name=original_filename,
-            status="pending",
-            uploaded_at=record.uploaded_at,
-        )
         return func.HttpResponse(
-            body=response.model_dump_json(),
+            body=UploadResponse(
+                document_id=document_id,
+                file_name=file.filename or blob_name,
+                status="pending",
+                uploaded_at=record.uploaded_at
+            ).model_dump_json(),
             status_code=202,
             mimetype="application/json",
         )
-
-    except InvalidFileTypeError as exc:
-        return func.HttpResponse(
-            json.dumps({"error": str(exc)}),
-            status_code=400,
-            mimetype="application/json",
-        )
     except Exception as exc:
-        logger.exception("Unexpected error during PDF upload")
-        return func.HttpResponse(
-            json.dumps({"error": "Internal server error."}),
-            status_code=500,
-            mimetype="application/json",
-        )
-
+        logger.exception("Upload failed")
+        return func.HttpResponse(json.dumps({"error": str(exc)}), status_code=500)
 
 # ---------------------------------------------------------------------------
-# PDF Processing Status
+# 4. PDF Status & Process
 # ---------------------------------------------------------------------------
-
 @app.route(route="pdf/status/{documentId}", methods=["GET"])
 def pdf_status(req: func.HttpRequest) -> func.HttpResponse:
-    """Return processing status for a given documentId."""
     import json
-
-    from shared.exceptions import DocumentNotFoundError
     from services.cosmos_service import CosmosRepository
     from shared.models import StatusResponse
-
     document_id = req.route_params.get("documentId", "")
-
     try:
-        repo = CosmosRepository()
-        doc = repo.get_document(document_id)
-        if doc is None:
-            raise DocumentNotFoundError(document_id)
-
-        response = StatusResponse(
+        doc = CosmosRepository().get_document(document_id)
+        return func.HttpResponse(StatusResponse(
             document_id=document_id,
             status=doc.get("status", "unknown"),
             progress=doc.get("progress", 0),
-            chunk_count=doc.get("chunk_count", 0),
-            error=doc.get("error"),
-        )
-        return func.HttpResponse(
-            body=response.model_dump_json(),
-            status_code=200,
-            mimetype="application/json",
-        )
-
-    except DocumentNotFoundError:
-        return func.HttpResponse(
-            json.dumps({"error": f"Document '{document_id}' not found."}),
-            status_code=404,
-            mimetype="application/json",
-        )
+            chunk_count=doc.get("chunk_count", 0)
+        ).model_dump_json(), status_code=200, mimetype="application/json")
     except Exception:
-        logger.exception("Error fetching document status")
-        return func.HttpResponse(
-            json.dumps({"error": "Internal server error."}),
-            status_code=500,
-            mimetype="application/json",
-        )
-
-
-# ---------------------------------------------------------------------------
-# PDF Process (internal trigger)
-# ---------------------------------------------------------------------------
+        return func.HttpResponse(json.dumps({"error": "Not found"}), status_code=404)
 
 @app.route(route="pdf/process", methods=["POST"])
 def pdf_process(req: func.HttpRequest) -> func.HttpResponse:
-    """Extract text, generate embeddings, and store chunks for a document."""
     import json
-
     from services.cosmos_service import CosmosRepository
     from services.storage_service import BlobStorageService
     from services.pdf_service import PDFService
@@ -206,76 +175,34 @@ def pdf_process(req: func.HttpRequest) -> func.HttpResponse:
     try:
         body = req.get_json()
         document_id = body.get("documentId")
-        if not document_id:
-            return func.HttpResponse(
-                json.dumps({"error": "Missing 'documentId' in request body."}),
-                status_code=400,
-                mimetype="application/json",
-            )
-
-        blob_name = f"{document_id}.pdf"
         repo = CosmosRepository()
         storage = BlobStorageService()
         pdf_service = PDFService()
         embedding_service = EmbeddingService()
 
-        # Update status → processing
         repo.update_document_status(document_id, "processing", progress=0)
-
-        pdf_bytes = storage.download_pdf(blob_name)
+        pdf_bytes = storage.download_pdf(f"{document_id}.pdf")
         pages = pdf_service.extract_text(pdf_bytes)
         chunks = pdf_service.chunk_text(pages)
-
         embeddings = embedding_service.embed_texts(chunks)
 
-        for idx, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
-            chunk = ChunkRecord(
-                id=str(uuid.uuid4()),
-                document_id=document_id,
-                chunk_index=idx,
-                text=chunk_text,
-                embedding=embedding,
-                created_at=datetime.now(timezone.utc).isoformat(),
-            )
+        for idx, (text, emb) in enumerate(zip(chunks, embeddings)):
+            chunk = ChunkRecord(id=str(uuid.uuid4()), document_id=document_id, chunk_index=idx, text=text, embedding=emb, created_at=datetime.now(timezone.utc).isoformat())
             repo.upsert_chunk(chunk.model_dump())
 
-        repo.update_document_status(
-            document_id, "completed", progress=100, chunk_count=len(chunks)
-        )
-
-        return func.HttpResponse(
-            json.dumps({"documentId": document_id, "chunkCount": len(chunks)}),
-            status_code=200,
-            mimetype="application/json",
-        )
-
+        repo.update_document_status(document_id, "completed", progress=100, chunk_count=len(chunks))
+        return func.HttpResponse(json.dumps({"documentId": document_id, "chunkCount": len(chunks)}), status_code=200)
     except Exception:
-        logger.exception("Error processing PDF document_id=%s", document_id)
-        if document_id:
-            try:
-                CosmosRepository().update_document_status(
-                    document_id, "failed", error="Processing error"
-                )
-            except Exception:
-                pass
-        return func.HttpResponse(
-            json.dumps({"error": "Internal server error."}),
-            status_code=500,
-            mimetype="application/json",
-        )
-
+        return func.HttpResponse(status_code=500)
 
 # ---------------------------------------------------------------------------
-# Chat Query
+# 5. Chat Query & History
 # ---------------------------------------------------------------------------
-
 @app.route(route="chat/query", methods=["POST"])
 def chat_query(req: func.HttpRequest) -> func.HttpResponse:
-    """Answer a user query using RAG over stored document chunks."""
     import json
     import uuid
     from datetime import datetime, timezone
-
     from shared.models import ChatQueryRequest, ChatQueryResponse, SourceReference
     from services.cosmos_service import CosmosRepository
     from services.embedding_service import EmbeddingService
@@ -284,94 +211,64 @@ def chat_query(req: func.HttpRequest) -> func.HttpResponse:
     try:
         body = req.get_json()
         query_req = ChatQueryRequest.model_validate(body)
-
-        embedding_service = EmbeddingService()
-        repo = CosmosRepository()
-        llm_service = LLMService()
-
-        query_embedding = embedding_service.embed_texts([query_req.query])[0]
-        top_chunks = repo.vector_search_chunks(
-            query_embedding=query_embedding,
-            document_ids=query_req.document_ids,
-            top_k=5,
-        )
-
-        answer = llm_service.generate_rag_answer(
-            query=query_req.query,
-            context_chunks=[c["text"] for c in top_chunks],
-        )
-
-        sources = [
-            SourceReference(
-                document_id=c["document_id"],
-                file_name=c.get("file_name", ""),
-                chunk_id=c["id"],
-                relevance_score=c.get("score", 0.0),
-                excerpt=c["text"][:300],
-            )
-            for c in top_chunks
-        ]
-
-        response = ChatQueryResponse(
-            answer=answer,
-            sources=sources,
-            message_id=str(uuid.uuid4()),
-            timestamp=datetime.now(timezone.utc).isoformat(),
-        )
-        return func.HttpResponse(
-            body=response.model_dump_json(),
-            status_code=200,
-            mimetype="application/json",
-        )
-
+        query_embedding = EmbeddingService().embed_texts([query_req.query])[0]
+        top_chunks = CosmosRepository().vector_search_chunks(query_embedding=query_embedding, document_ids=query_req.document_ids, top_k=5)
+        answer = LLMService().generate_rag_answer(query=query_req.query, context_chunks=[c["text"] for c in top_chunks])
+        
+        sources = [SourceReference(document_id=c["document_id"], file_name=c.get("file_name", ""), chunk_id=c["id"], relevance_score=c.get("score", 0.0), excerpt=c["text"][:300]) for c in top_chunks]
+        return func.HttpResponse(ChatQueryResponse(answer=answer, sources=sources, message_id=str(uuid.uuid4()), timestamp=datetime.now(timezone.utc).isoformat()).model_dump_json(), status_code=200, mimetype="application/json")
     except Exception:
-        logger.exception("Error processing chat query")
-        return func.HttpResponse(
-            json.dumps({"error": "Internal server error."}),
-            status_code=500,
-            mimetype="application/json",
-        )
-
-
-# ---------------------------------------------------------------------------
-# Chat History
-# ---------------------------------------------------------------------------
+        return func.HttpResponse(status_code=500)
 
 @app.route(route="chat/history", methods=["GET"])
 def chat_history(req: func.HttpRequest) -> func.HttpResponse:
-    """Return chat message history for a session."""
     import json
-
     from services.cosmos_service import CosmosRepository
-
     session_id = req.params.get("sessionId")
     try:
-        limit = int(req.params.get("limit", "50"))
-        offset = int(req.params.get("offset", "0"))
-    except ValueError:
-        return func.HttpResponse(
-            json.dumps({"error": "limit and offset must be integers."}),
-            status_code=400,
-            mimetype="application/json",
-        )
-
-    try:
-        repo = CosmosRepository()
-        session = repo.get_session(session_id) if session_id else None
-        messages = (session or {}).get("messages", [])
-        total = len(messages)
-        page = messages[offset : offset + limit]
-
-        return func.HttpResponse(
-            json.dumps({"messages": page, "total": total, "hasMore": offset + limit < total}),
-            status_code=200,
-            mimetype="application/json",
-        )
-
+        messages = (CosmosRepository().get_session(session_id) or {}).get("messages", [])
+        return func.HttpResponse(json.dumps({"messages": messages, "total": len(messages)}), status_code=200, mimetype="application/json")
     except Exception:
-        logger.exception("Error fetching chat history")
-        return func.HttpResponse(
-            json.dumps({"error": "Internal server error."}),
-            status_code=500,
-            mimetype="application/json",
-        )
+        return func.HttpResponse(status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# 8. http_get (기본 스텁)
+# ---------------------------------------------------------------------------
+@app.route(route="http_get", methods=["GET"])
+def http_get(req: func.HttpRequest) -> func.HttpResponse:
+    name = req.params.get("name")
+    if not name:
+        try:
+            req_body = req.get_json()
+        except ValueError:
+            pass
+        else:
+            name = req_body.get("name")
+    if name:
+        return func.HttpResponse(f"Hello, {name}. This HTTP triggered function executed successfully.")
+    return func.HttpResponse(
+        "This HTTP triggered function executed successfully. Pass a name in the query string or in the request body for a personalized response.",
+        status_code=200,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. http_post (기본 스텁)
+# ---------------------------------------------------------------------------
+@app.route(route="http_post", methods=["POST"])
+def http_post(req: func.HttpRequest) -> func.HttpResponse:
+    name = req.params.get("name")
+    if not name:
+        try:
+            req_body = req.get_json()
+        except ValueError:
+            pass
+        else:
+            name = req_body.get("name")
+    if name:
+        return func.HttpResponse(f"Hello, {name}. This HTTP triggered function executed successfully.")
+    return func.HttpResponse(
+        "This HTTP triggered function executed successfully. Pass a name in the query string or in the request body for a personalized response.",
+        status_code=200,
+    )
